@@ -4,3 +4,5 @@ pyqt5
 scipy
 matplotlib
 scipy
+torch
+librosa

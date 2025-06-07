@@ -10,11 +10,17 @@ from PyQt5.QtWidgets import QWidget, QVBoxLayout, QLabel, QFrame, QPushButton, Q
 from PyQt5.QtCore import Qt, QPropertyAnimation, QRect, QEasingCurve
 from PyQt5.QtWidgets import QSizePolicy, QGraphicsDropShadowEffect
 from PyQt5.QtGui import QColor
+from utils.visualization import MFFCCanvas
 
 
 
 
 class NoiseCancelUI(QMainWindow):
+    def update_mfcc_plot(self, mfcc):
+        if hasattr(self, "mfcc_canvas") and mfcc is not None:
+            self.mfcc_canvas.plot_mfcc(mfcc, 44100)
+
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Hearing Aid Dashboard")
@@ -187,6 +193,10 @@ class NoiseCancelUI(QMainWindow):
         card_layout.addWidget(label)
         card_layout.addWidget(self.slider)
         card.setLayout(card_layout)
+        self.mfcc_canvas = MFFCCanvas()
+        card_layout.addWidget(self.mfcc_canvas)
+
+
 
         self.start_button.clicked.connect(self.start_audio)
         self.stop_button.clicked.connect(self.stop_audio)
@@ -477,15 +487,17 @@ class NoiseCancelUI(QMainWindow):
             border-radius: 10px;
         }
         """
-
+        
     def start_audio(self):
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         threading.Thread(
             target=self.audio_processor.start_processing,
-            args=(self.slider.value(),),
+            args=(self.slider.value(), self.update_mfcc_plot),  # ✅ Pass callback properly
             daemon=True
         ).start()
+
+
 
     def stop_audio(self):
         self.start_button.setEnabled(True)
