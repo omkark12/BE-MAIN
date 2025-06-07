@@ -2,6 +2,7 @@ import pyaudio
 import numpy as np
 from audio_processing.noise_filter import fft_filter
 from audio_processing.mvdr import mvdr_beamforming
+from audio_processing.stft_vad import vad_energy, compute_stft
 
 class AudioProcessor:
     def __init__(self):
@@ -23,9 +24,17 @@ class AudioProcessor:
             data = input_stream.read(self.chunk, exception_on_overflow=False)
             audio_data = np.frombuffer(data, dtype=np.int16)
 
-            # Apply noise cancellation
-            filtered_data = fft_filter(audio_data, self.rate, intensity)
+            # Apply VAD
+            voice_only = vad_energy(audio_data, self.rate)
+
+            # Optional: Visualize STFT or use it for more analysis
+            # f, t, stft_result = compute_stft(voice_only, self.rate)
+
+            # Apply FFT filtering on speech only
+            filtered_data = fft_filter(voice_only, self.rate, intensity)
+
             output_stream.write(filtered_data.tobytes())
+
 
         input_stream.stop_stream()
         input_stream.close()
