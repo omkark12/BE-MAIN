@@ -1,9 +1,9 @@
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QLabel, QSlider, QStackedWidget, QFrame, QGraphicsDropShadowEffect,
-    QLineEdit, QSpinBox, QListWidget, QMessageBox, QSizePolicy
+    QLineEdit, QSpinBox, QListWidget, QMessageBox, QSizePolicy, QProgressBar
 )
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt, QTimer, QPointF
 from PyQt5.QtGui import QColor
 import threading
 from audio_processing.audio_io import AudioProcessor
@@ -153,8 +153,79 @@ class NoiseCancelUI(QMainWindow):
         layout.setContentsMargins(40, 30, 40, 30)
         layout.setSpacing(20)
 
-        card = QFrame()
-        card.setStyleSheet("""
+        # Status indicators
+        status_card = QFrame()
+        status_card.setStyleSheet("""
+            QFrame {
+                background-color: rgba(255,255,255,0.05);
+                border-radius: 20px;
+                padding: 20px;
+                border: 1px solid rgba(255,255,255,0.1);
+            }
+        """)
+        status_layout = QVBoxLayout()
+
+        # VAD Status
+        vad_layout = QHBoxLayout()
+        vad_label = QLabel("Voice Activity:")
+        vad_label.setStyleSheet("color: #f1f1f1;")
+        self.vad_status = QLabel("Inactive")
+        self.vad_status.setStyleSheet("color: #d63031; font-weight: bold;")
+        vad_layout.addWidget(vad_label)
+        vad_layout.addWidget(self.vad_status)
+        vad_layout.addStretch()
+
+        # Noise Type
+        noise_layout = QHBoxLayout()
+        noise_label = QLabel("Noise Type:")
+        noise_label.setStyleSheet("color: #f1f1f1;")
+        self.noise_type = QLabel("Unknown")
+        self.noise_type.setStyleSheet("color: #f1f1f1; font-weight: bold;")
+        noise_layout.addWidget(noise_label)
+        noise_layout.addWidget(self.noise_type)
+        noise_layout.addStretch()
+
+        # Confidence Bar
+        conf_layout = QHBoxLayout()
+        conf_label = QLabel("Confidence:")
+        conf_label.setStyleSheet("color: #f1f1f1;")
+        self.confidence_bar = QProgressBar()
+        self.confidence_bar.setStyleSheet("""
+            QProgressBar {
+                border: none;
+                border-radius: 5px;
+                text-align: center;
+                background-color: #2d3436;
+            }
+            QProgressBar::chunk {
+                background-color: #00b894;
+                border-radius: 5px;
+            }
+        """)
+        self.confidence_bar.setMaximum(100)
+        conf_layout.addWidget(conf_label)
+        conf_layout.addWidget(self.confidence_bar)
+
+        # Processing Status
+        proc_layout = QHBoxLayout()
+        proc_label = QLabel("Processing:")
+        proc_label.setStyleSheet("color: #f1f1f1;")
+        self.proc_status = QLabel("Idle")
+        self.proc_status.setStyleSheet("color: #f1f1f1; font-weight: bold;")
+        proc_layout.addWidget(proc_label)
+        proc_layout.addWidget(self.proc_status)
+        proc_layout.addStretch()
+
+        # Add all status indicators
+        status_layout.addLayout(vad_layout)
+        status_layout.addLayout(noise_layout)
+        status_layout.addLayout(conf_layout)
+        status_layout.addLayout(proc_layout)
+        status_card.setLayout(status_layout)
+
+        # Main control card
+        control_card = QFrame()
+        control_card.setStyleSheet("""
             QFrame {
                 background-color: rgba(255,255,255,0.05);
                 border-radius: 20px;
@@ -166,9 +237,15 @@ class NoiseCancelUI(QMainWindow):
         shadow.setBlurRadius(20)
         shadow.setOffset(0, 5)
         shadow.setColor(QColor(0, 0, 0, 180))
-        card.setGraphicsEffect(shadow)
+        control_card.setGraphicsEffect(shadow)
 
-        self.audio_processor = AudioProcessor()
+        # Initialize audio processor with error handling
+        try:
+            self.audio_processor = AudioProcessor()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to initialize audio: {str(e)}")
+            self.audio_processor = None
+
         self.start_button = QPushButton("▶ Start Listening")
         self.stop_button = QPushButton("■ Stop Listening")
         self.stop_button.setEnabled(False)
@@ -176,31 +253,53 @@ class NoiseCancelUI(QMainWindow):
         self.start_button.setStyleSheet(self.button_style("#00b894"))
         self.stop_button.setStyleSheet(self.button_style("#d63031"))
 
+        # Connect buttons with error handling
+        self.start_button.clicked.connect(self.start_audio)
+        self.stop_button.clicked.connect(self.stop_audio)
+
+        # Noise reduction slider
+        slider_layout = QVBoxLayout()
         self.slider = QSlider(Qt.Horizontal)
         self.slider.setMinimum(1)
         self.slider.setMaximum(100)
         self.slider.setValue(50)
         self.slider.setStyleSheet(self.slider_style())
+        
+        # Add value label
+        self.slider_value = QLabel("50%")
+        self.slider_value.setStyleSheet("color: #f1f1f1; font-size: 14px;")
+        self.slider_value.setAlignment(Qt.AlignCenter)
+        self.slider.valueChanged.connect(lambda v: self.slider_value.setText(f"{v}%"))
 
-        label = QLabel("Noise Reduction Level")
-        label.setStyleSheet("color: #f1f1f1;")
-        label.setAlignment(Qt.AlignCenter)
+        slider_label = QLabel("Noise Reduction Level")
+        slider_label.setStyleSheet("color: #f1f1f1;")
+        slider_label.setAlignment(Qt.AlignCenter)
 
+        slider_layout.addWidget(slider_label)
+        slider_layout.addWidget(self.slider)
+        slider_layout.addWidget(self.slider_value)
+
+        # Button layout
         btn_layout = QHBoxLayout()
         btn_layout.addWidget(self.start_button)
         btn_layout.addWidget(self.stop_button)
 
-        card_layout = QVBoxLayout()
-        card_layout.addLayout(btn_layout)
-        card_layout.addWidget(label)
-        card_layout.addWidget(self.slider)
-        card.setLayout(card_layout)
+        # Control layout
+        control_layout = QVBoxLayout()
+        control_layout.addLayout(btn_layout)
+        control_layout.addLayout(slider_layout)
+        control_card.setLayout(control_layout)
 
-        self.start_button.clicked.connect(self.start_audio)
-        self.stop_button.clicked.connect(self.stop_audio)
-
-        layout.addWidget(card)
+        # Add cards to main layout
+        layout.addWidget(status_card)
+        layout.addWidget(control_card)
         layout.addStretch()
+
+        # Initialize status update timer
+        self.status_timer = QTimer()
+        self.status_timer.timeout.connect(self.update_audio_status)
+        self.status_timer.setInterval(100)  # Update every 100ms
+
         page.setLayout(layout)
         return page
 
@@ -631,18 +730,102 @@ class NoiseCancelUI(QMainWindow):
         """
 
     def start_audio(self):
-        self.start_button.setEnabled(False)
-        self.stop_button.setEnabled(True)
-        threading.Thread(
-            target=self.audio_processor.start_processing,
-            args=(self.slider.value(),),
-            daemon=True
-        ).start()
+        """Start audio processing with error handling"""
+        if not self.audio_processor:
+            QMessageBox.critical(self, "Error", "Audio processor not initialized")
+            return
+
+        try:
+            self.start_button.setEnabled(False)
+            self.stop_button.setEnabled(True)
+            self.proc_status.setText("Starting...")
+            self.proc_status.setStyleSheet("color: #fdcb6e; font-weight: bold;")
+            
+            # Start in a separate thread to avoid UI blocking
+            def start_processing():
+                try:
+                    self.audio_processor.start_stream(self.slider.value())
+                except Exception as e:
+                    self.handle_audio_error(str(e))
+                    return
+                
+                # Update UI from main thread
+                self.proc_status.setText("Active")
+                self.proc_status.setStyleSheet("color: #00b894; font-weight: bold;")
+                self.status_timer.start()
+            
+            threading.Thread(target=start_processing, daemon=True).start()
+            
+        except Exception as e:
+            self.handle_audio_error(str(e))
 
     def stop_audio(self):
+        """Stop audio processing with error handling"""
+        try:
+            self.start_button.setEnabled(True)
+            self.stop_button.setEnabled(False)
+            self.proc_status.setText("Stopping...")
+            self.proc_status.setStyleSheet("color: #fdcb6e; font-weight: bold;")
+            
+            def stop_processing():
+                try:
+                    self.audio_processor.stop_stream()
+                except Exception as e:
+                    self.handle_audio_error(str(e))
+                    return
+                
+                # Update UI from main thread
+                self.status_timer.stop()
+                self.vad_status.setText("Inactive")
+                self.vad_status.setStyleSheet("color: #d63031; font-weight: bold;")
+                self.noise_type.setText("Unknown")
+                self.confidence_bar.setValue(0)
+                self.proc_status.setText("Idle")
+                self.proc_status.setStyleSheet("color: #f1f1f1; font-weight: bold;")
+            
+            threading.Thread(target=stop_processing, daemon=True).start()
+            
+        except Exception as e:
+            self.handle_audio_error(str(e))
+
+    def handle_audio_error(self, error_msg):
+        """Centralized error handling for audio processing"""
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
-        self.audio_processor.stop_processing()
+        self.status_timer.stop()
+        self.proc_status.setText("Error")
+        self.proc_status.setStyleSheet("color: #d63031; font-weight: bold;")
+        self.vad_status.setText("Inactive")
+        self.vad_status.setStyleSheet("color: #d63031; font-weight: bold;")
+        self.noise_type.setText("Unknown")
+        self.confidence_bar.setValue(0)
+        QMessageBox.critical(self, "Error", f"Audio processing error: {error_msg}")
+
+    def update_audio_status(self):
+        """Update audio processing status with error handling"""
+        if not self.audio_processor or not self.audio_processor.is_active():
+            return
+
+        try:
+            # Update VAD status
+            if self.audio_processor.is_voice_active():
+                self.vad_status.setText("Active")
+                self.vad_status.setStyleSheet("color: #00b894; font-weight: bold;")
+            else:
+                self.vad_status.setText("Inactive")
+                self.vad_status.setStyleSheet("color: #d63031; font-weight: bold;")
+
+            # Update noise classification
+            noise_info = self.audio_processor.get_noise_info()
+            if noise_info:
+                self.noise_type.setText(noise_info['noise_type'].replace('_', ' ').title())
+                self.confidence_bar.setValue(int(noise_info['confidence'] * 100))
+            else:
+                self.noise_type.setText("Unknown")
+                self.confidence_bar.setValue(0)
+
+        except Exception as e:
+            self.handle_audio_error(str(e))
 
     def add_reminder(self):
         task_name = self.task_input.text().strip()
