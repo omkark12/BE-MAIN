@@ -118,7 +118,6 @@ def filter_noise(data: np.ndarray, rate: int,
 def filter_noise_robust(data: np.ndarray, rate: int, noise_type: str = None) -> np.ndarray:
     """
     Robust noise filtering using spectral gating and frequency-selective processing
-    with enhanced voice preservation
     """
     try:
         # Convert to float32
@@ -144,73 +143,64 @@ def filter_noise_robust(data: np.ndarray, rate: int, noise_type: str = None) -> 
         # Get frequency bins
         freqs = librosa.fft_frequencies(sr=rate, n_fft=n_fft)
         
-        # Define frequency ranges with more precise voice frequencies
+        # Define frequency ranges
         voice_ranges = [
-            (85, 180),     # Male fundamental (narrower range)
-            (165, 255),    # Male speech formants
-            (200, 400),    # Female fundamental
-            (300, 1000),   # First formant region
-            (800, 2300),   # Second/Third formant region
-            (2300, 3500)   # Consonants and clarity
+            (85, 255),     # Male fundamental
+            (165, 400),    # Female fundamental
+            (400, 2000),   # Main formants
+            (2000, 3500)   # Consonants
         ]
         
-        # Create frequency mask with better voice preservation
+        # Create frequency mask
         freq_mask = np.ones(len(freqs))
         
         # Set different reduction levels for different frequency ranges
         for low, high in voice_ranges:
             mask = (freqs >= low) & (freqs <= high)
-            if 300 <= low <= 1000:  # First formant
-                freq_mask[mask] = 0.15  # Much more preservation (85% preserved)
-            elif 800 <= low <= 2300:  # Second/Third formants
-                freq_mask[mask] = 0.2   # Strong preservation (80% preserved)
-            elif low >= 2300:  # Consonants
-                freq_mask[mask] = 0.25  # Good preservation (75% preserved)
+            if low == 400 and high == 2000:  # Formants
+                freq_mask[mask] = 0.3  # Preserve more
+            elif low >= 2000:  # Consonants
+                freq_mask[mask] = 0.4
             else:  # Fundamentals
-                freq_mask[mask] = 0.2   # Strong preservation (80% preserved)
+                freq_mask[mask] = 0.35
         
-        # Still aggressive outside voice ranges but slightly reduced
-        freq_mask[freqs < 85] = 0.90     # Very low frequencies
-        freq_mask[freqs > 3500] = 0.85   # High frequencies
+        # More aggressive reduction outside voice ranges
+        freq_mask[freqs < 85] = 0.95    # Very low frequencies
+        freq_mask[freqs > 3500] = 0.92  # High frequencies
         
-        # Adjust noise reduction strength based on type
+        # Noise type specific parameters
         reduction_strength = {
-            'background_noise': 0.85,  # Reduced from 0.95
-            'music': 0.88,            # Reduced from 0.92
-            'machine': 0.92,          # Reduced from 0.97
-            'white_noise': 0.92,      # Reduced from 0.97
-            'speech': 0.70,           # Reduced from 0.80
-            'other': 0.85             # Reduced from 0.90
-        }.get(noise_type, 0.85)
+            'background_noise': 0.95,
+            'music': 0.92,
+            'machine': 0.97,
+            'white_noise': 0.97,
+            'speech': 0.80,
+            'other': 0.90
+        }.get(noise_type, 0.90)
         
-        # More conservative noise floor estimation
-        noise_floor = np.percentile(mag, 15, axis=1)  # Changed from 20 to 15
+        # Estimate noise floor
+        noise_floor = np.percentile(mag, 20, axis=1)
         
-        # Apply spectral gating with smoother transition
+        # Apply spectral gating
         gain_mask = np.maximum(
             1.0 - reduction_strength * freq_mask[:, np.newaxis] * (
-                noise_floor[:, np.newaxis] / (mag + 1e-8)
+                noise_floor[:, np.newaxis] / (mag + 1e-10)
             ),
-            0.05  # Increased minimum gain for better voice preservation
+            0.02  # Minimum gain
         )
         
-        # Enhanced smoothing for better voice continuity
-        gain_mask = gaussian_filter1d(gain_mask, sigma=1.5, axis=1)
+        # Smooth the mask
+        gain_mask = gaussian_filter1d(gain_mask, sigma=1, axis=1)
         
         # Apply mask
         mag_clean = mag * gain_mask
         
-        # Enhanced voice frequency boosting
-        formant_mask = (freqs >= 300) & (freqs <= 2300)  # Wider formant range
-        consonant_mask = (freqs >= 2300) & (freqs <= 3500)
+        # Boost voice frequencies
+        formant_mask = (freqs >= 400) & (freqs <= 2000)
+        consonant_mask = (freqs >= 2000) & (freqs <= 3500)
         
-        # Stronger boosting for voice frequencies
-        mag_clean[formant_mask] *= 1.35    # Increased formant boost
-        mag_clean[consonant_mask] *= 1.25  # Increased consonant boost
-        
-        # Additional enhancement for main speech frequencies
-        main_speech_mask = (freqs >= 500) & (freqs <= 1500)
-        mag_clean[main_speech_mask] *= 1.4  # Extra boost for main speech range
+        mag_clean[formant_mask] *= 1.2    # Boost formants
+        mag_clean[consonant_mask] *= 1.15  # Boost consonants
         
         # Reconstruct signal
         D_clean = mag_clean * np.exp(1j * phase)
@@ -225,10 +215,6 @@ def filter_noise_robust(data: np.ndarray, rate: int, noise_type: str = None) -> 
             audio_clean = audio_clean[:len(float_data)]
         elif len(audio_clean) < len(float_data):
             audio_clean = np.pad(audio_clean, (0, len(float_data) - len(audio_clean)))
-        
-        # Mix in a small amount of original signal for voice preservation
-        mix_ratio = 0.15  # Added mixing with original
-        audio_clean = (1 - mix_ratio) * audio_clean + mix_ratio * float_data
         
         # Convert back to original format
         return denormalize_audio(audio_clean)
