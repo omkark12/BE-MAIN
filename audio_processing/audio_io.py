@@ -296,6 +296,10 @@ class AudioProcessor:
                 self.overlap_buffer = filtered_data[-self.chunk:]
                 output_data = filtered_data[:self.chunk]
                 
+                # Amplify the processed audio (increase volume)
+                amplification_factor = 1.75  # Adjust this value to control amplification (1.0 = no change, >1.0 = louder)
+                output_data = output_data * amplification_factor
+                
                 # Convert back to int16
                 result = self._denormalize_audio(output_data)
                 
