@@ -199,7 +199,7 @@ class MLAudioProcessor:
             return audio
 
         try:
-            denoised = self.denoiser.denoise(float_audio, sample_rate)
+            denoised = self.denoiser.denoise(float_audio, sample_rate, noise_type)
             # Return in the same format as input
             if original_dtype == np.int16:
                 return (denoised * 32767).astype(np.int16)
@@ -334,227 +334,314 @@ class ThresholdVAD:
             return np.ones_like(audio, dtype=bool)
 
 class SimpleNoiseClassifier:
-    """Simple noise classifier using spectral features"""
+    """Enhanced noise classifier using multiple spectral features"""
     def __init__(self):
         self.noise_classes = [
-            'background_noise', 'speech', 'music', 'machine', 'traffic',
-            'nature', 'animal', 'human', 'impact', 'other'
+            'background_noise',  # Ambient room noise
+            'speech',           # Human speech
+            'music',            # Musical sounds
+            'machine',          # Mechanical/electronic sounds
+            'traffic',          # Vehicle/road noise
+            'impact',           # Sudden loud noises
+            'white_noise'       # Constant spectrum noise
         ]
-        # Adjust frame parameters
-        self.n_fft = 1024  # Match chunk size
-        self.hop_length = 256  # Reduced for better overlap
-        self.n_mels = 64  # Reduced for faster processing
-
-    def classify(self, audio: np.ndarray, sample_rate: int) -> dict:
+        
+        # Optimized analysis parameters
+        self.n_fft = 2048      # Larger FFT for better frequency resolution
+        self.hop_length = 512  # Shorter hop for better temporal resolution
+        self.n_mels = 80       # More mel bands for better frequency discrimination
+        
+        # Feature extraction parameters
+        self.frame_length = 2048
+        self.min_freq = 20
+        self.max_freq = 8000
+        
+    def _extract_features(self, audio: np.ndarray, sample_rate: int) -> dict:
+        """Extract comprehensive set of audio features"""
+        features = {}
+        
         try:
-            # Ensure input length is sufficient
-            if len(audio) < self.n_fft:
-                return {'noise_type': 'unknown', 'confidence': 0.0}
-                
-            # Extract features with adjusted parameters
+            # Basic spectral features
             mel_spec = librosa.feature.melspectrogram(
                 y=audio,
                 sr=sample_rate,
                 n_fft=self.n_fft,
                 hop_length=self.hop_length,
                 n_mels=self.n_mels,
-                center=False  # Disable centering
+                fmin=self.min_freq,
+                fmax=self.max_freq
             )
             
             # Convert to log scale
             mel_spec_db = librosa.power_to_db(mel_spec, ref=np.max)
             
-            # Extract features with adjusted parameters
-            spectral_centroid = np.mean(librosa.feature.spectral_centroid(
+            # Spectral features
+            features['spectral_centroid'] = np.mean(librosa.feature.spectral_centroid(
                 y=audio, 
                 sr=sample_rate,
                 n_fft=self.n_fft,
-                hop_length=self.hop_length,
-                center=False
+                hop_length=self.hop_length
             ))
             
-            spectral_rolloff = np.mean(librosa.feature.spectral_rolloff(
-                y=audio, 
+            features['spectral_bandwidth'] = np.mean(librosa.feature.spectral_bandwidth(
+                y=audio,
                 sr=sample_rate,
                 n_fft=self.n_fft,
-                hop_length=self.hop_length,
-                center=False
+                hop_length=self.hop_length
             ))
             
-            zero_crossing_rate = np.mean(librosa.feature.zero_crossing_rate(
+            features['spectral_rolloff'] = np.mean(librosa.feature.spectral_rolloff(
+                y=audio,
+                sr=sample_rate,
+                n_fft=self.n_fft,
+                hop_length=self.hop_length
+            ))
+            
+            features['spectral_flatness'] = np.mean(librosa.feature.spectral_flatness(
+                y=audio,
+                n_fft=self.n_fft,
+                hop_length=self.hop_length
+            ))
+            
+            # Temporal features
+            features['zero_crossing_rate'] = np.mean(librosa.feature.zero_crossing_rate(
                 audio,
-                frame_length=self.n_fft,
-                hop_length=self.hop_length,
-                center=False
+                frame_length=self.frame_length,
+                hop_length=self.hop_length
             ))
             
-            # Enhanced classification logic
-            if zero_crossing_rate > 0.15:
-                if spectral_centroid > 3000:
-                    noise_type = 'machine'
-                    confidence = 0.8
-                else:
-                    noise_type = 'speech'
-                    confidence = 0.7
-            elif spectral_rolloff < 1000:
-                if zero_crossing_rate < 0.05:
-                    noise_type = 'background_noise'
-                    confidence = 0.75
-                else:
-                    noise_type = 'nature'
-                    confidence = 0.6
-            elif 1000 <= spectral_centroid <= 2000:
-                if zero_crossing_rate > 0.1:
-                    noise_type = 'human'
-                    confidence = 0.65
-                else:
-                    noise_type = 'music'
-                    confidence = 0.7
+            # Energy features
+            features['rms_energy'] = np.mean(librosa.feature.rms(
+                y=audio,
+                frame_length=self.frame_length,
+                hop_length=self.hop_length
+            ))
+            
+            # Rhythm features
+            tempo, _ = librosa.beat.beat_track(
+                y=audio,
+                sr=sample_rate,
+                hop_length=self.hop_length
+            )
+            features['tempo'] = tempo
+            
+            # Mel-frequency features
+            mfcc = librosa.feature.mfcc(
+                S=librosa.power_to_db(mel_spec),
+                n_mfcc=13
+            )
+            features['mfcc_mean'] = np.mean(mfcc, axis=1)
+            features['mfcc_var'] = np.var(mfcc, axis=1)
+            
+            return features
+            
+        except Exception as e:
+            print(f"Feature extraction error: {str(e)}")
+            return None
+
+    def classify(self, audio: np.ndarray, sample_rate: int) -> dict:
+        """
+        Classify noise type using extracted features
+        """
+        try:
+            # Extract features
+            features = self._extract_features(audio, sample_rate)
+            if features is None:
+                return {'noise_type': 'unknown', 'confidence': 0.0}
+            
+            # Simple rule-based classification
+            confidence = 0.0
+            noise_type = 'unknown'
+            
+            # White noise detection
+            if (features['spectral_flatness'] > 0.6 and
+                features['zero_crossing_rate'] > 0.4):
+                noise_type = 'white_noise'
+                confidence = min(1.0, features['spectral_flatness'])
+            
+            # Music detection
+            elif (features['tempo'] > 50 and
+                  features['spectral_rolloff'] > 3000 and
+                  np.std(features['mfcc_mean']) > 2.0):
+                noise_type = 'music'
+                confidence = 0.8
+            
+            # Machine noise detection
+            elif (features['spectral_flatness'] > 0.3 and
+                  features['spectral_bandwidth'] < 2000 and
+                  features['zero_crossing_rate'] < 0.3):
+                noise_type = 'machine'
+                confidence = 0.7
+            
+            # Traffic noise detection
+            elif (features['spectral_centroid'] < 2000 and
+                  features['spectral_rolloff'] < 4000 and
+                  features['rms_energy'] > 0.1):
+                noise_type = 'traffic'
+                confidence = 0.6
+            
+            # Impact noise detection
+            elif (features['zero_crossing_rate'] > 0.6 and
+                  features['rms_energy'] > 0.3):
+                noise_type = 'impact'
+                confidence = 0.7
+            
+            # Speech detection (when it's not the main signal)
+            elif (2000 < features['spectral_centroid'] < 3000 and
+                  np.mean(features['mfcc_var']) > 1.5):
+                noise_type = 'speech'
+                confidence = 0.65
+            
+            # Background noise (default)
             else:
-                noise_type = 'other'
+                noise_type = 'background_noise'
                 confidence = 0.5
             
             return {
                 'noise_type': noise_type,
-                'confidence': confidence
+                'confidence': float(confidence)
             }
             
         except Exception as e:
-            print(f"Warning: Feature extraction failed: {str(e)}")
-            return {
-                'noise_type': 'unknown',
-                'confidence': 0.0
-            }
+            print(f"Classification error: {str(e)}")
+            return {'noise_type': 'unknown', 'confidence': 0.0}
 
 class SpectralDenoiser:
-    """Balanced spectral denoiser with adaptive noise estimation"""
+    """Robust spectral denoiser with dual-stage noise reduction"""
     def __init__(self):
-        # FFT parameters
-        self.n_fft = 2048  # Back to larger FFT for better frequency resolution
+        # Core parameters
+        self.n_fft = 2048
         self.hop_length = 512
         self.win_length = 2048
         
-        # Pre-compute constants
-        self.window = np.hanning(self.win_length).astype(np.float32)
-        self.freq_bins = np.fft.rfftfreq(self.n_fft, 1/44100).astype(np.float32)
+        # Voice frequency ranges
+        self.voice_freq_ranges = [
+            (85, 255),    # Male fundamental
+            (165, 400),   # Female fundamental
+            (400, 2000),  # Main formants
+            (2000, 3500)  # Consonants
+        ]
         
-        # Voice and noise parameters
-        self.voice_freq_range = (50, 8000)  # Wider range for better voice capture
-        self.noise_estimation_percentile = 40  # More conservative noise estimation
+        # Noise reduction parameters
+        self.noise_params = {
+            'background_noise': {'reduction': 0.95, 'threshold': 0.02},
+            'music': {'reduction': 0.92, 'threshold': 0.02},
+            'machine': {'reduction': 0.97, 'threshold': 0.01},
+            'white_noise': {'reduction': 0.97, 'threshold': 0.01},
+            'speech': {'reduction': 0.80, 'threshold': 0.05},
+            'other': {'reduction': 0.90, 'threshold': 0.03}
+        }
         
-        # Adaptive thresholds
-        self.noise_floor_min = 1e-4
-        self.noise_floor_max = 1.0
-        self.noise_reduction_strength = 0.6  # Moderate reduction
+        # Enhancement factors
+        self.voice_boost = {
+            'formant': 1.2,
+            'consonant': 1.15
+        }
         
         # Smoothing parameters
-        self.temporal_smoothing_factor = 0.7
-        self.freq_smoothing_width = 4
+        self.smooth_factor = 0.85
         
-        # Initialize noise profile
-        self.noise_profile = None
-        self.noise_profile_weight = 0.7
+    def _get_noise_threshold(self, mag_spec):
+        """Estimate noise threshold using percentile method"""
+        return np.percentile(mag_spec, 20, axis=1, keepdims=True)
+    
+    def _apply_frequency_weighting(self, freqs):
+        """Apply frequency-dependent weighting"""
+        weights = np.ones_like(freqs)
         
-    def _estimate_noise_profile(self, mag):
-        """Estimate noise profile using statistical methods"""
-        if mag.shape[1] < 4:  # Need minimum frames for estimation
-            return np.mean(mag, axis=1, keepdims=True)
-            
-        # Sort magnitudes along time axis
-        sorted_mag = np.sort(mag, axis=1)
-        # Use lowest 20% of magnitudes for initial estimate
-        n_lowest = max(1, int(0.2 * mag.shape[1]))
-        noise_estimate = np.mean(sorted_mag[:, :n_lowest], axis=1, keepdims=True)
+        # Weight voice frequencies
+        for low, high in self.voice_freq_ranges:
+            mask = (freqs >= low) & (freqs <= high)
+            if low == 400 and high == 2000:  # Formants
+                weights[mask] = 0.3  # Preserve more
+            elif low >= 2000:  # Consonants
+                weights[mask] = 0.4
+            else:  # Fundamentals
+                weights[mask] = 0.35
         
-        return noise_estimate
+        # More reduction outside voice range
+        weights[freqs < 85] = 1.5
+        weights[freqs > 3500] = 1.4
         
-    def _smooth_mask(self, mask):
-        """Apply 2D smoothing to the mask"""
-        # Temporal smoothing
-        smoothed = np.zeros_like(mask)
-        alpha = self.temporal_smoothing_factor
-        
-        smoothed[:, 0] = mask[:, 0]
-        for i in range(1, mask.shape[1]):
-            smoothed[:, i] = alpha * smoothed[:, i-1] + (1-alpha) * mask[:, i]
-            
-        # Frequency smoothing
-        from scipy.ndimage import gaussian_filter1d
-        smoothed = gaussian_filter1d(smoothed, sigma=1.5, axis=0)
-        
-        return smoothed
-
-    def denoise(self, audio: np.ndarray, sample_rate: int) -> np.ndarray:
+        return weights[:, np.newaxis]
+    
+    def denoise(self, audio: np.ndarray, sample_rate: int, noise_type: str = None) -> np.ndarray:
         try:
-            # Input validation and preprocessing
+            # Input validation
             audio = ensure_float32(audio)
             if len(audio.shape) > 1:
                 audio = audio.flatten()
             
             if len(audio) < self.n_fft:
                 return audio
-                
+            
+            # Get noise parameters
+            params = self.noise_params.get(noise_type, self.noise_params['other'])
+            
             # Compute STFT
-            D = librosa.stft(audio,
-                           n_fft=self.n_fft,
-                           hop_length=self.hop_length,
-                           win_length=self.win_length,
-                           window=self.window,
-                           center=True)  # Enable centering for better edge handling
+            D = librosa.stft(
+                audio,
+                n_fft=self.n_fft,
+                hop_length=self.hop_length,
+                win_length=self.win_length,
+                window='hann',
+                center=True
+            )
             
-            # Compute magnitude and phase
-            mag = np.abs(D)
-            phase = np.angle(D)
+            # Get magnitude and phase
+            mag_spec = np.abs(D)
+            phase_spec = np.angle(D)
             
-            # Estimate current noise profile
-            current_noise_profile = self._estimate_noise_profile(mag)
+            # Get frequency bins
+            freqs = librosa.fft_frequencies(sr=sample_rate, n_fft=self.n_fft)
             
-            # Update running noise profile
-            if self.noise_profile is None:
-                self.noise_profile = current_noise_profile
-            else:
-                self.noise_profile = (self.noise_profile_weight * self.noise_profile + 
-                                    (1 - self.noise_profile_weight) * current_noise_profile)
+            # Get frequency weights
+            weights = self._apply_frequency_weighting(freqs)
             
-            # Compute adaptive threshold based on frequency
-            freq_weights = np.ones_like(self.freq_bins)
-            voice_mask = ((self.freq_bins >= self.voice_freq_range[0]) & 
-                         (self.freq_bins <= self.voice_freq_range[1]))
-            freq_weights[voice_mask] *= 0.6  # Less reduction in voice range
-            freq_weights = freq_weights[:, np.newaxis]
+            # Estimate noise threshold
+            noise_thresh = self._get_noise_threshold(mag_spec)
             
-            # Calculate noise reduction mask
-            noise_mask = (mag - self.noise_reduction_strength * freq_weights * self.noise_profile)
-            noise_mask = noise_mask / (mag + self.noise_floor_min)
-            noise_mask = np.maximum(0, noise_mask)
-            noise_mask = np.minimum(1, noise_mask)
+            # Apply noise reduction
+            gain = np.maximum(
+                1.0 - params['reduction'] * weights * (noise_thresh / (mag_spec + 1e-10)),
+                params['threshold']
+            )
             
-            # Apply smoothing
-            noise_mask = self._smooth_mask(noise_mask)
+            # Smooth the gain
+            smoothed_gain = np.zeros_like(gain)
+            smoothed_gain[:, 0] = gain[:, 0]
+            for i in range(1, gain.shape[1]):
+                smoothed_gain[:, i] = (self.smooth_factor * smoothed_gain[:, i-1] + 
+                                     (1 - self.smooth_factor) * gain[:, i])
             
-            # Apply mask and reconstruct
-            mag_denoised = mag * noise_mask
-            D_denoised = mag_denoised * np.exp(1j * phase)
+            # Apply gain and enhance voice frequencies
+            mag_spec_clean = mag_spec * smoothed_gain
             
-            # Inverse STFT
-            audio_denoised = librosa.istft(D_denoised,
-                                         hop_length=self.hop_length,
-                                         win_length=self.win_length,
-                                         window=self.window,
-                                         center=True)
+            # Enhance formants and consonants
+            formant_mask = (freqs >= 400) & (freqs <= 2000)
+            consonant_mask = (freqs >= 2000) & (freqs <= 3500)
             
-            # Ensure output length matches input
+            mag_spec_clean[formant_mask] *= self.voice_boost['formant']
+            mag_spec_clean[consonant_mask] *= self.voice_boost['consonant']
+            
+            # Reconstruct signal
+            D_clean = mag_spec_clean * np.exp(1j * phase_spec)
+            audio_denoised = librosa.istft(
+                D_clean,
+                hop_length=self.hop_length,
+                win_length=self.win_length,
+                window='hann',
+                center=True
+            )
+            
+            # Match length
             if len(audio_denoised) > len(audio):
                 audio_denoised = audio_denoised[:len(audio)]
             elif len(audio_denoised) < len(audio):
                 audio_denoised = np.pad(audio_denoised, (0, len(audio) - len(audio_denoised)))
             
-            # Mix in a small amount of the original signal
-            mix_ratio = 0.15
-            audio_denoised = (1 - mix_ratio) * audio_denoised + mix_ratio * audio
-            
             return audio_denoised.astype(np.float32)
             
         except Exception as e:
             print(f"Denoising error: {str(e)}")
-            return audio 
+            return audio

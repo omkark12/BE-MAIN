@@ -1,6 +1,8 @@
 import numpy as np
 from typing import Optional, Tuple, Dict
 from .ml_models import MLAudioProcessor
+import librosa
+from scipy.ndimage import gaussian_filter1d
 
 # Initialize ML processor as a singleton
 _ml_processor = None
@@ -94,28 +96,143 @@ def filter_noise(data: np.ndarray, rate: int,
     """
     noise_info = None
     
-    # Convert to float32 for processing
     try:
+        # Convert to float32 for processing
         float_data = normalize_audio(data)
-    except Exception as e:
-        print(f"Warning: Data normalization failed: {str(e)}")
-        return data, noise_info
-    
-    if use_ml:
+        
+        # Analyze noise type
         try:
             ml_proc = get_ml_processor()
-            # Analyze noise type
             noise_info = ml_proc.classify_noise(float_data, rate)
-            
-            # Apply ML-based denoising
-            filtered_float = ml_proc.denoise_audio(float_data, rate, noise_info['noise_type'])
-            
-            # Convert back to int16
-            return denormalize_audio(filtered_float), noise_info
-            
         except Exception as e:
-            print(f"Warning: ML-based filtering failed ({str(e)}), falling back to FFT filtering")
-            return fft_filter(data, rate, intensity), noise_info
-    
-    # Fall back to FFT-based filtering
-    return fft_filter(data, rate, intensity), noise_info
+            print(f"Warning: Noise classification failed: {str(e)}")
+            noise_info = {'noise_type': 'unknown', 'confidence': 0.0}
+        
+        # Use robust noise filtering
+        return filter_noise_robust(data, rate, noise_info['noise_type']), noise_info
+            
+    except Exception as e:
+        print(f"Warning: Noise filtering failed: {str(e)}")
+        return data, noise_info
+
+def filter_noise_robust(data: np.ndarray, rate: int, noise_type: str = None) -> np.ndarray:
+    """
+    Robust noise filtering using spectral gating and frequency-selective processing
+    with enhanced voice preservation
+    """
+    try:
+        # Convert to float32
+        float_data = normalize_audio(data)
+        
+        # FFT parameters
+        n_fft = 2048
+        hop_length = 512
+        win_length = 2048
+        
+        # Compute STFT
+        D = librosa.stft(float_data,
+                        n_fft=n_fft,
+                        hop_length=hop_length,
+                        win_length=win_length,
+                        window='hann',
+                        center=True)
+        
+        # Get magnitude and phase
+        mag = np.abs(D)
+        phase = np.angle(D)
+        
+        # Get frequency bins
+        freqs = librosa.fft_frequencies(sr=rate, n_fft=n_fft)
+        
+        # Define frequency ranges with more precise voice frequencies
+        voice_ranges = [
+            (85, 180),     # Male fundamental (narrower range)
+            (165, 255),    # Male speech formants
+            (200, 400),    # Female fundamental
+            (300, 1000),   # First formant region
+            (800, 2300),   # Second/Third formant region
+            (2300, 3500)   # Consonants and clarity
+        ]
+        
+        # Create frequency mask with better voice preservation
+        freq_mask = np.ones(len(freqs))
+        
+        # Set different reduction levels for different frequency ranges
+        for low, high in voice_ranges:
+            mask = (freqs >= low) & (freqs <= high)
+            if 300 <= low <= 1000:  # First formant
+                freq_mask[mask] = 0.15  # Much more preservation (85% preserved)
+            elif 800 <= low <= 2300:  # Second/Third formants
+                freq_mask[mask] = 0.2   # Strong preservation (80% preserved)
+            elif low >= 2300:  # Consonants
+                freq_mask[mask] = 0.25  # Good preservation (75% preserved)
+            else:  # Fundamentals
+                freq_mask[mask] = 0.2   # Strong preservation (80% preserved)
+        
+        # Still aggressive outside voice ranges but slightly reduced
+        freq_mask[freqs < 85] = 0.90     # Very low frequencies
+        freq_mask[freqs > 3500] = 0.85   # High frequencies
+        
+        # Adjust noise reduction strength based on type
+        reduction_strength = {
+            'background_noise': 0.85,  # Reduced from 0.95
+            'music': 0.88,            # Reduced from 0.92
+            'machine': 0.92,          # Reduced from 0.97
+            'white_noise': 0.92,      # Reduced from 0.97
+            'speech': 0.70,           # Reduced from 0.80
+            'other': 0.85             # Reduced from 0.90
+        }.get(noise_type, 0.85)
+        
+        # More conservative noise floor estimation
+        noise_floor = np.percentile(mag, 15, axis=1)  # Changed from 20 to 15
+        
+        # Apply spectral gating with smoother transition
+        gain_mask = np.maximum(
+            1.0 - reduction_strength * freq_mask[:, np.newaxis] * (
+                noise_floor[:, np.newaxis] / (mag + 1e-8)
+            ),
+            0.05  # Increased minimum gain for better voice preservation
+        )
+        
+        # Enhanced smoothing for better voice continuity
+        gain_mask = gaussian_filter1d(gain_mask, sigma=1.5, axis=1)
+        
+        # Apply mask
+        mag_clean = mag * gain_mask
+        
+        # Enhanced voice frequency boosting
+        formant_mask = (freqs >= 300) & (freqs <= 2300)  # Wider formant range
+        consonant_mask = (freqs >= 2300) & (freqs <= 3500)
+        
+        # Stronger boosting for voice frequencies
+        mag_clean[formant_mask] *= 1.35    # Increased formant boost
+        mag_clean[consonant_mask] *= 1.25  # Increased consonant boost
+        
+        # Additional enhancement for main speech frequencies
+        main_speech_mask = (freqs >= 500) & (freqs <= 1500)
+        mag_clean[main_speech_mask] *= 1.4  # Extra boost for main speech range
+        
+        # Reconstruct signal
+        D_clean = mag_clean * np.exp(1j * phase)
+        audio_clean = librosa.istft(D_clean,
+                                  hop_length=hop_length,
+                                  win_length=win_length,
+                                  window='hann',
+                                  center=True)
+        
+        # Ensure output length matches input
+        if len(audio_clean) > len(float_data):
+            audio_clean = audio_clean[:len(float_data)]
+        elif len(audio_clean) < len(float_data):
+            audio_clean = np.pad(audio_clean, (0, len(float_data) - len(audio_clean)))
+        
+        # Mix in a small amount of original signal for voice preservation
+        mix_ratio = 0.15  # Added mixing with original
+        audio_clean = (1 - mix_ratio) * audio_clean + mix_ratio * float_data
+        
+        # Convert back to original format
+        return denormalize_audio(audio_clean)
+        
+    except Exception as e:
+        print(f"Robust noise filtering error: {str(e)}")
+        return data
