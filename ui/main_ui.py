@@ -1,18 +1,14 @@
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-    QLabel, QSlider, QStackedWidget, QFrame, QGraphicsDropShadowEffect
+    QLabel, QSlider, QStackedWidget, QFrame, QGraphicsDropShadowEffect,
+    QLineEdit, QSpinBox, QListWidget, QMessageBox, QSizePolicy
 )
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QColor
 import threading
 from audio_processing.audio_io import AudioProcessor
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QLabel, QFrame, QPushButton, QStackedWidget, QHBoxLayout
-from PyQt5.QtCore import Qt, QPropertyAnimation, QRect, QEasingCurve
-from PyQt5.QtWidgets import QSizePolicy, QGraphicsDropShadowEffect
-from PyQt5.QtGui import QColor
-
-
-
+from audio_processing.reminder import ReminderSystem
+from datetime import datetime
 
 class NoiseCancelUI(QMainWindow):
     def __init__(self):
@@ -20,18 +16,24 @@ class NoiseCancelUI(QMainWindow):
         self.setWindowTitle("Hearing Aid Dashboard")
         self.setGeometry(200, 100, 900, 550)
         self.setStyleSheet("font-family: 'Segoe UI';")
-
+        
+        # Initialize reminder system
+        self.reminder_system = ReminderSystem()
+        self.reminder_system.start()
+        
         main_layout = QHBoxLayout()
         sidebar = self.create_sidebar()
         self.stack = QStackedWidget()
 
         self.home_page = self.create_home_page()
         self.realtime_page = self.create_realtime_page()
+        self.reminder_page = self.create_reminder_page()
         self.info_viewer_page = self.create_sliding_info_widget()
         self.about_page = self.create_about_page()
 
         self.stack.addWidget(self.home_page)
         self.stack.addWidget(self.realtime_page)
+        self.stack.addWidget(self.reminder_page)
         self.stack.addWidget(self.info_viewer_page)
         self.stack.addWidget(self.about_page)
 
@@ -42,6 +44,11 @@ class NoiseCancelUI(QMainWindow):
         container.setLayout(main_layout)
         container.setStyleSheet("background-color: #101820;")
         self.setCentralWidget(container)
+        
+        # Set up timer to update reminder list
+        self.update_timer = QTimer()
+        self.update_timer.timeout.connect(self.update_reminder_list)
+        self.update_timer.start(1000)  # Update every second
 
     def create_sidebar(self):
         layout = QVBoxLayout()
@@ -51,6 +58,7 @@ class NoiseCancelUI(QMainWindow):
         buttons = [
             ("🏠 Home", lambda: self.stack.setCurrentWidget(self.home_page)),
             ("🎧 Real-Time", lambda: self.stack.setCurrentWidget(self.realtime_page)),
+            ("⏰ Reminders", lambda: self.stack.setCurrentWidget(self.reminder_page)),
             ("🧾 Tech-Stack", lambda: self.stack.setCurrentWidget(self.info_viewer_page)),
             ("ℹ️ About", lambda: self.stack.setCurrentWidget(self.about_page)),
         ]
@@ -196,7 +204,155 @@ class NoiseCancelUI(QMainWindow):
         page.setLayout(layout)
         return page
 
+    def create_reminder_page(self):
+        page = QWidget()
+        layout = QVBoxLayout()
+        layout.setContentsMargins(40, 30, 40, 30)
+        layout.setSpacing(20)
 
+        # Create input section
+        input_card = QFrame()
+        input_card.setStyleSheet("""
+            QFrame {
+                background-color: rgba(255,255,255,0.05);
+                border-radius: 20px;
+                padding: 20px;
+                border: 1px solid rgba(255,255,255,0.1);
+            }
+        """)
+        
+        input_layout = QVBoxLayout()
+        
+        # Task name input
+        task_label = QLabel("Task Name:")
+        task_label.setStyleSheet("color: #f1f1f1; font-weight: bold;")
+        self.task_input = QLineEdit()
+        self.task_input.setPlaceholderText("e.g., Drink Water, Take a Break, Exercise")
+        self.task_input.setStyleSheet("""
+            QLineEdit {
+                padding: 8px;
+                border-radius: 5px;
+                background-color: rgba(255,255,255,0.1);
+                color: white;
+                border: 1px solid rgba(255,255,255,0.2);
+                font-size: 14px;
+            }
+            QLineEdit:focus {
+                border: 1px solid rgba(255,255,255,0.4);
+                background-color: rgba(255,255,255,0.15);
+            }
+        """)
+        
+        # Interval input
+        interval_layout = QHBoxLayout()
+        interval_label = QLabel("Interval (minutes):")
+        interval_label.setStyleSheet("color: #f1f1f1; font-weight: bold;")
+        self.interval_input = QSpinBox()
+        self.interval_input.setRange(1, 1440)  # 1 minute to 24 hours
+        self.interval_input.setValue(30)
+        self.interval_input.setStyleSheet("""
+            QSpinBox {
+                padding: 8px;
+                border-radius: 5px;
+                background-color: rgba(255,255,255,0.1);
+                color: white;
+                border: 1px solid rgba(255,255,255,0.2);
+                font-size: 14px;
+                min-width: 80px;
+            }
+            QSpinBox:focus {
+                border: 1px solid rgba(255,255,255,0.4);
+                background-color: rgba(255,255,255,0.15);
+            }
+            QSpinBox::up-button, QSpinBox::down-button {
+                border: none;
+                background: rgba(255,255,255,0.1);
+                border-radius: 2px;
+                margin: 1px;
+            }
+            QSpinBox::up-button:hover, QSpinBox::down-button:hover {
+                background: rgba(255,255,255,0.2);
+            }
+        """)
+        interval_layout.addWidget(interval_label)
+        interval_layout.addWidget(self.interval_input)
+        interval_layout.addStretch()
+        
+        # Add button
+        add_button = QPushButton("➕ Add Reminder")
+        add_button.setStyleSheet(self.button_style("#00b894"))
+        add_button.clicked.connect(self.add_reminder)
+        
+        input_layout.addWidget(task_label)
+        input_layout.addWidget(self.task_input)
+        input_layout.addLayout(interval_layout)
+        input_layout.addWidget(add_button)
+        input_card.setLayout(input_layout)
+        
+        # Create reminder list
+        list_card = QFrame()
+        list_card.setStyleSheet("""
+            QFrame {
+                background-color: rgba(255,255,255,0.05);
+                border-radius: 20px;
+                padding: 20px;
+                border: 1px solid rgba(255,255,255,0.1);
+            }
+        """)
+        
+        list_layout = QVBoxLayout()
+        list_label = QLabel("Active Reminders:")
+        list_label.setStyleSheet("color: #f1f1f1; font-weight: bold; font-size: 16px;")
+        self.reminder_list = QListWidget()
+        self.reminder_list.setStyleSheet("""
+            QListWidget {
+                background-color: rgba(255,255,255,0.1);
+                border-radius: 10px;
+                padding: 10px;
+                color: white;
+                font-size: 14px;
+            }
+            QListWidget::item {
+                padding: 10px;
+                border-bottom: 1px solid rgba(255,255,255,0.1);
+                margin-bottom: 5px;
+            }
+            QListWidget::item:selected {
+                background-color: rgba(255,255,255,0.2);
+                border-radius: 5px;
+            }
+            QListWidget::item:hover {
+                background-color: rgba(255,255,255,0.15);
+                border-radius: 5px;
+            }
+        """)
+        
+        button_layout = QHBoxLayout()
+        
+        toggle_button = QPushButton("🔄 Toggle Active/Inactive")
+        toggle_button.setStyleSheet(self.button_style("#f1c40f"))
+        toggle_button.clicked.connect(self.toggle_reminder)
+        
+        remove_button = QPushButton("🗑️ Remove Selected")
+        remove_button.setStyleSheet(self.button_style("#d63031"))
+        remove_button.clicked.connect(self.remove_reminder)
+        
+        button_layout.addWidget(toggle_button)
+        button_layout.addWidget(remove_button)
+        
+        list_layout.addWidget(list_label)
+        list_layout.addWidget(self.reminder_list)
+        list_layout.addLayout(button_layout)
+        list_card.setLayout(list_layout)
+        
+        # Connect reminder system signals
+        self.reminder_system.reminder_triggered.connect(self.on_reminder_triggered)
+        self.reminder_system.reminder_updated.connect(self.update_reminder_list)
+        
+        layout.addWidget(input_card)
+        layout.addWidget(list_card)
+        page.setLayout(layout)
+        return page
 
     def create_sliding_info_widget(self):
         page = QWidget()
@@ -347,8 +503,6 @@ class NoiseCancelUI(QMainWindow):
 
         return page
 
-
-
     def create_about_page(self):
         about_page = QWidget()
         about_page.setStyleSheet("background-color: #1e272e;")
@@ -432,8 +586,6 @@ class NoiseCancelUI(QMainWindow):
         about_page.setLayout(layout)
         return about_page
 
-
-
     def button_style(self, color):
         return f"""
         QPushButton {{
@@ -491,3 +643,47 @@ class NoiseCancelUI(QMainWindow):
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
         self.audio_processor.stop_processing()
+
+    def add_reminder(self):
+        task_name = self.task_input.text().strip()
+        interval = self.interval_input.value()
+        
+        if not task_name:
+            QMessageBox.warning(self, "Error", "Please enter a task name")
+            return
+            
+        self.reminder_system.add_reminder(task_name, interval)
+        self.task_input.clear()
+        
+    def remove_reminder(self):
+        current_item = self.reminder_list.currentItem()
+        if current_item:
+            task_name = current_item.text().split(" - ")[0].strip()
+            self.reminder_system.remove_reminder(task_name)
+            
+    def toggle_reminder(self):
+        current_item = self.reminder_list.currentItem()
+        if current_item:
+            task_name = current_item.text().split(" - ")[0].strip()
+            self.reminder_system.toggle_reminder(task_name)
+            
+    def on_reminder_triggered(self, task_name):
+        """Handle reminder trigger event"""
+        # You could add visual feedback here if desired
+        pass
+            
+    def update_reminder_list(self):
+        self.reminder_list.clear()
+        for reminder in self.reminder_system.get_reminders():
+            next_trigger = reminder['next_trigger']
+            time_until = next_trigger - datetime.now()
+            minutes = max(0, int(time_until.total_seconds() / 60))
+            
+            status = "🟢 Active" if reminder['active'] else "⚫ Inactive"
+            item_text = f"{reminder['task_name']} - {status} - Next: {minutes} minutes"
+            self.reminder_list.addItem(item_text)
+
+    def closeEvent(self, event):
+        """Handle application close"""
+        self.reminder_system.stop()
+        super().closeEvent(event)
